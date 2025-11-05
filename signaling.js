@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const WebSocket = require('ws');
 
 const clients = new Map(); // Mapa para almacenar clientes conectados con sus IDs
+const usernames = new Map(); // Mapa para almacenar nombres de usuario
 
 /**
  * Configura toda la lógica de señalización en una instancia del servidor WebSocket.
@@ -11,6 +12,7 @@ function setupSignaling(wss) {
     wss.on('connection', ws => {
         const userId = uuidv4();
         clients.set(userId, ws);
+        usernames.set(userId, `Usuario ${userId.substring(0, 6)}`);
         console.log(`Nuevo cliente conectado: ${userId}`);
 
         // Lógica de Heartbeat (Latido) para detectar conexiones inactivas
@@ -36,12 +38,47 @@ function setupSignaling(wss) {
         ws.on('message', message => {
             try {
                 const parsedMessage = JSON.parse(message);
-                const targetClient = clients.get(parsedMessage.userId);
+                
+                // Manejar diferentes tipos de mensajes
+                if (parsedMessage.type === 'chat-message') {
+                    // Transmitir mensaje de chat a todos los demás clientes
+                    const chatMessage = {
+                        type: 'chat-message',
+                        fromUserId: userId,
+                        message: parsedMessage.message,
+                        timestamp: Date.now()
+                    };
+                    
+                    clients.forEach((client, id) => {
+                        if (id !== userId && client.readyState === WebSocket.OPEN) {
+                            client.send(JSON.stringify(chatMessage));
+                        }
+                    });
+                } else if (parsedMessage.type === 'username-update') {
+                    // Actualizar nombre de usuario
+                    usernames.set(userId, parsedMessage.username);
+                    
+                    const updateMessage = {
+                        type: 'username-update',
+                        userId: userId,
+                        username: parsedMessage.username
+                    };
+                    
+                    // Notificar a todos los clientes
+                    clients.forEach((client, id) => {
+                        if (client.readyState === WebSocket.OPEN) {
+                            client.send(JSON.stringify(updateMessage));
+                        }
+                    });
+                } else {
+                    // Mensajes de señalización WebRTC (offer, answer, ice-candidate)
+                    const targetClient = clients.get(parsedMessage.userId);
 
-                if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-                    // Añadir el ID del remitente al mensaje antes de reenviarlo
-                    const messageToSend = { ...parsedMessage, fromUserId: userId };
-                    targetClient.send(JSON.stringify(messageToSend));
+                    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+                        // Añadir el ID del remitente al mensaje antes de reenviarlo
+                        const messageToSend = { ...parsedMessage, fromUserId: userId };
+                        targetClient.send(JSON.stringify(messageToSend));
+                    }
                 }
             } catch (error) {
                 console.error(`Fallo al parsear mensaje o formato inválido de ${userId}:`, message.toString(), error);
@@ -50,6 +87,7 @@ function setupSignaling(wss) {
 
         ws.on('close', () => {
             clients.delete(userId);
+            usernames.delete(userId);
             console.log(`Cliente desconectado: ${userId}`);
             // Notificar a todos los demás clientes que un usuario se ha ido
             clients.forEach(client => {
